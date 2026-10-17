@@ -1,0 +1,13 @@
+{
+  "name": "AutoTranslate",
+  "description": "Automatically translates messages that aren't in English and shows the English translation under the original message.",
+  "authors": [
+    {
+      "name": "MarkLong0467"
+    }
+  ],
+  "main": "src/index.ts",
+  "vendetta": {
+    "icon": "GlobeEarthIcon"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "autotranselate",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Revenge (Discord mobile) plugin that automatically translates non-English messages into English under the original message.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "tsc --noEmit",
+    "test": "node build.mjs && node --test \"test/*.test.mjs\""
+  },
+  "devDependencies": {
+    "@swc/core": "1.16.18",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3"
+  }
+}
