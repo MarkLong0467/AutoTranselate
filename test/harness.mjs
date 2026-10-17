@@ -24,6 +24,13 @@ export function parseContent(content) {
 	return nodes;
 }
 
+// Discord's MessageRecord is immutable; merge() returns an updated copy.
+function makeRecord(props) {
+	const record = { ...props };
+	Object.defineProperty(record, "merge", { value: fields => makeRecord({ ...record, ...fields }) });
+	return record;
+}
+
 export function createDiscord() {
 	const channels = new Map(); // channelId -> Map(messageId -> message)
 	const native = { calls: [], rows: new Map() };
@@ -72,6 +79,11 @@ export function createDiscord() {
 	}
 
 	function render(channelId, messages) {
+		// Simulates Discord batching away a re-render.
+		if (discord.dropRenders > 0) {
+			discord.dropRenders--;
+			return;
+		}
 		const rows = [];
 		messages.forEach((message, index) => {
 			const row = rowFor(message, index);
@@ -94,11 +106,9 @@ export function createDiscord() {
 					const channel = channels.get(action.message.channel_id);
 					const existing = channel?.get(action.message.id);
 					if (existing) {
-						const updated = { ...existing, content: action.message.content };
+						const updated = action.message.content ? existing.merge({ content: action.message.content }) : existing;
 						channel.set(updated.id, updated);
-						// Simulates Discord batching away a re-render.
-						if (discord.dropRenders > 0) discord.dropRenders--;
-						else render(updated.channel_id, [updated]);
+						render(updated.channel_id, [updated]);
 					}
 				}
 			} finally {
@@ -107,9 +117,41 @@ export function createDiscord() {
 		},
 	};
 
+	// Discord's per-channel message cache (ChannelMessages). update() returns a new
+	// cache object; commit() stores it.
+	const commits = [];
+	function channelCache(channelId, map = channels.get(channelId) ?? new Map()) {
+		return {
+			channelId,
+			map,
+			has: id => map.has(id),
+			get: id => map.get(id),
+			update(id, fn) {
+				const next = new Map(map);
+				next.set(id, fn(map.get(id)));
+				return channelCache(channelId, next);
+			},
+		};
+	}
+	const ChannelMessages = {
+		_channelMessages: {},
+		clearCache() {},
+		get: channelId => (channels.has(channelId) ? channelCache(channelId) : undefined),
+		getOrCreate: channelId => channelCache(channelId),
+		commit(cache) {
+			commits.push(cache.channelId);
+			channels.set(cache.channelId, cache.map);
+		},
+	};
+
 	const MessageStore = {
 		getMessage: (channelId, id) => channels.get(channelId)?.get(id),
 		getMessages: channelId => ({ toArray: () => [...(channels.get(channelId)?.values() ?? [])] }),
+		emitChange() {
+			// Set emitChangeRenders = false to simulate a Discord version that ignores this.
+			if (!discord.emitChangeRenders) return;
+			for (const channelId of channels.keys()) render(channelId, [...channels.get(channelId).values()]);
+		},
 	};
 
 	const stores = {
@@ -119,9 +161,9 @@ export function createDiscord() {
 		UserStore: { getCurrentUser: () => ({ id: "me" }) },
 	};
 
-	function addMessage(id, content, { channelId = "c1", authorId = "u1", type = 0 } = {}) {
+	function addMessage(id, content, { channelId = "c1", authorId = "u1", type = 0, state = "SENT" } = {}) {
 		if (!channels.has(channelId)) channels.set(channelId, new Map());
-		const message = { id, channel_id: channelId, content, type, author: { id: authorId } };
+		const message = makeRecord({ id, channel_id: channelId, content, type, state, author: { id: authorId } });
 		channels.get(channelId).set(id, message);
 		return message;
 	}
@@ -158,6 +200,10 @@ export function createDiscord() {
 
 	const discord = {
 		dropRenders: 0,
+		cacheEnabled: true,
+		emitChangeRenders: true,
+		ChannelMessages,
+		commits,
 		chatModule,
 		native,
 		dispatched,
@@ -207,7 +253,12 @@ export function loadPlugin(discord, { js, storage = {}, components = {} }) {
 		},
 		metro: {
 			findByStoreName: name => discord.stores[name],
-			findByProps: (...props) => (props.every(p => p in components) ? components : undefined),
+			findByProps: (...props) => {
+				if (props.every(p => p in discord.ChannelMessages)) {
+					return discord.cacheEnabled ? discord.ChannelMessages : undefined;
+				}
+				return props.every(p => p in components) ? components : undefined;
+			},
 			common: {
 				React: createReact(),
 				ReactNative: {
@@ -253,8 +304,6 @@ export function rowText(row) {
 
 export function translationNodes(row) {
 	return (row?.message?.content ?? []).filter(
-		node =>
-			(node.type === "subtext" && node.content?.[0]?.content?.startsWith("🌐 "))
-			|| (node.type === "text" && node.content.startsWith("🌐 ")),
+		node => node.type === "text" && typeof node.content === "string" && node.content.startsWith("\n🌐 "),
 	);
 }

@@ -8,9 +8,11 @@ let unpatch: (() => void) | undefined;
 
 export default {
 	onLoad() {
-		storage.smallText ??= true;
 		storage.showLanguage ??= true;
-		storage.translateOwn ??= true;
+		storage.ownMessages ??= false;
+		// Settings from the first version.
+		delete storage.smallText;
+		delete storage.translateOwn;
 
 		unpatch = patchChat();
 	},

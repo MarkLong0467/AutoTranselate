@@ -8,7 +8,7 @@ Hola amigo, ¿cómo estás?
 🌐 Spanish: Hello friend, how are you?
 ```
 
-English messages are left alone. Code blocks, links, mentions, emoji and spoilers are never sent for translation.
+English messages are left alone, and so are your own messages unless you turn that on. Code blocks, links, mentions, emoji and spoilers are never sent for translation.
 
 ## Install
 
@@ -28,9 +28,8 @@ English messages are left alone. Code blocks, links, mentions, emoji and spoiler
 
 Tap the plugin in Revenge's plugin list to open its settings:
 
-- **Small translation text**: shows translations as small grey text (Discord's `-#` subtext style). If translations don't appear on your Discord version, turn this off to use normal text.
-- **Show original language**: starts each translation with the language it came from, like `Spanish:`.
-- **Translate my own messages**: also translates messages you send. On by default.
+- **Show original language**: starts each translation with the language it came from, like `Spanish:`. On by default.
+- **Translate my own messages**: also translates messages you send, once they've been sent. Off by default.
 - **Clear saved translations**: forgets cached translations and translates again.
 
 ## Good to know
@@ -42,9 +41,9 @@ Tap the plugin in Revenge's plugin list to open its settings:
 
 ## How it works
 
-Discord renders chat natively. The JavaScript side sends rendered message rows to native code as JSON through `NativeChatModule.updateRows`. The plugin hooks that call, reads each message's parsed text, checks whether it's English (a quick local word check first, then Google's language detection), and appends the translation to the message's content as extra nodes.
+Discord renders chat natively. The JavaScript side sends rendered message rows to native code as JSON through `NativeChatModule.updateRows`. The plugin hooks that call, reads each message's parsed text, checks whether it's English (a quick local word check first, then Google's language detection), and appends the translation to the message's content as a plain text node.
 
-Translations arrive after a row is first drawn. To redraw the row, the plugin briefly appends an invisible character to the message (a local `MESSAGE_UPDATE`, never sent to Discord's servers) and restores it about 400 ms later.
+Translations arrive after a row is first drawn. To redraw the row, the plugin briefly appends an invisible character to the message in Discord's local message cache and removes it about 400 ms later, the same way Vencord's `MessageUpdater` re-renders messages. Nothing is sent to Discord's servers, and no Flux event is dispatched, so other plugins (like message loggers) don't see an edit. If that doesn't redraw the row on your Discord version, the plugin falls back to a local `MESSAGE_UPDATE` carrying only the message's id, channel and content. Messages that are still sending are never touched.
 
 The code is in `src/`:
 

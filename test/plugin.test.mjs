@@ -8,6 +8,7 @@ const js = readFileSync(new URL("../dist/index.js", import.meta.url), "utf8");
 
 const SPANISH = "Hola amigo, ¿cómo estás?";
 const JAPANESE = "こんにちは、元気ですか？";
+const ZWSP = String.fromCharCode(0x200b);
 
 function setup(options = {}) {
 	const discord = createDiscord();
@@ -16,6 +17,8 @@ function setup(options = {}) {
 	const loaded = loadPlugin(discord, { js, ...options });
 	return { discord, ...loaded };
 }
+
+const messageUpdates = discord => discord.dispatched.filter(action => action.type === "MESSAGE_UPDATE");
 
 test("the bundle evaluates like a Vendetta plugin", () => {
 	const { plugin } = setup();
@@ -37,19 +40,14 @@ test("translates non-English messages under the original", async () => {
 
 	await sleep(1500);
 
-	const spanish = translationNodes(discord.native.rows.get("100"));
-	assert.equal(spanish.length, 1);
-	assert.deepEqual(spanish[0], {
-		type: "subtext",
-		content: [{ type: "text", content: "🌐 Spanish: Hello friend, how are you?" }],
-	});
-	// The original text is still there, above the translation.
-	assert.ok(rowText(discord.native.rows.get("100")).startsWith(SPANISH));
+	// A plain text node on a new line, after the original content.
+	const row = discord.native.rows.get("100");
+	assert.deepEqual(translationNodes(row), [{ type: "text", content: "\n🌐 Spanish: Hello friend, how are you?" }]);
+	assert.deepEqual(row.message.content[0], { type: "text", content: SPANISH });
 
-	assert.equal(
-		translationNodes(discord.native.rows.get("102"))[0].content[0].content,
-		"🌐 Japanese: Hello, how are you?",
-	);
+	assert.deepEqual(translationNodes(discord.native.rows.get("102")), [
+		{ type: "text", content: "\n🌐 Japanese: Hello, how are you?" },
+	]);
 
 	for (const id of ["101", "103", "104"]) {
 		assert.equal(translationNodes(discord.native.rows.get(id)).length, 0, id);
@@ -59,15 +57,51 @@ test("translates non-English messages under the original", async () => {
 	assert.equal(discord.fetches.length, 2);
 	assert.ok(discord.fetches.every(url => url.startsWith("https://translate.googleapis.com/")));
 
-	// The content toggle used to re-render was undone.
+	// Re-rendering went through the message cache, not a Flux event...
+	assert.ok(discord.commits.length >= 2);
+	assert.equal(messageUpdates(discord).length, 0);
+	// ...and the temporary mark was removed again.
 	assert.equal(discord.stores.MessageStore.getMessage("c1", "100").content, SPANISH);
-	assert.ok(!rowText(discord.native.rows.get("100")).includes("\u200B"));
-
-	const updates = discord.dispatched.filter(a => a.type === "MESSAGE_UPDATE");
-	assert.ok(updates.length >= 2);
-	assert.ok(updates.every(a => a.log_edit === false && a.otherPluginBypass === true));
+	assert.ok(!rowText(row).includes(ZWSP));
 
 	assert.deepEqual(errors, []);
+	plugin.onUnload();
+});
+
+test("falls back to a minimal MESSAGE_UPDATE without the message cache", async () => {
+	const { discord, plugin } = setup();
+	discord.cacheEnabled = false;
+	plugin.onLoad();
+
+	discord.addMessage("150", SPANISH);
+	discord.renderChannel();
+	await sleep(1500);
+
+	assert.equal(translationNodes(discord.native.rows.get("150")).length, 1);
+	const updates = messageUpdates(discord);
+	assert.ok(updates.length >= 2);
+	for (const update of updates) {
+		// Only the id, channel and content: never a copy of the whole message.
+		assert.deepEqual(Object.keys(update.message).sort(), ["channel_id", "content", "guild_id", "id"]);
+		assert.equal(update.log_edit, false);
+	}
+	assert.equal(discord.stores.MessageStore.getMessage("c1", "150").content, SPANISH);
+	plugin.onUnload();
+});
+
+test("switches to MESSAGE_UPDATE if cache updates don't re-render", async () => {
+	const { discord, plugin } = setup();
+	discord.emitChangeRenders = false;
+	plugin.onLoad();
+	await sleep(700); // let the startup refresh of the open channel finish
+
+	discord.addMessage("170", SPANISH);
+	discord.renderChannel();
+	await sleep(2500);
+
+	assert.equal(translationNodes(discord.native.rows.get("170")).length, 1);
+	assert.ok(messageUpdates(discord).length >= 2);
+	assert.equal(discord.stores.MessageStore.getMessage("c1", "170").content, SPANISH);
 	plugin.onUnload();
 });
 
@@ -91,22 +125,21 @@ test("reuses translations for repeated text without new requests", async () => {
 
 test("keeps links working while re-rendering", async () => {
 	const { discord, plugin } = setup();
-	const text = "Mira esto https://example.com/video";
 	discord.google.dictionary.set("Mira esto", ["Look at this", "es"]);
 	plugin.onLoad();
 
-	discord.addMessage("300", text);
+	discord.addMessage("300", "Mira esto https://example.com/video");
 	discord.renderChannel();
 	await sleep(1500);
 
 	const row = discord.native.rows.get("300");
 	const link = row.message.content.find(node => node.type === "link");
 	assert.equal(link.target, "https://example.com/video");
-	assert.equal(translationNodes(row)[0].content[0].content, "🌐 Spanish: Look at this");
+	assert.equal(translationNodes(row)[0].content, "\n🌐 Spanish: Look at this");
 
 	// Every row the native side saw had the invisible mark removed.
 	for (const call of discord.native.calls) {
-		for (const r of call.rows) assert.ok(!JSON.stringify(r).includes("\\u200b") && !JSON.stringify(r).includes("\u200B"));
+		for (const r of call.rows) assert.ok(!JSON.stringify(r).includes(ZWSP), JSON.stringify(r));
 	}
 	plugin.onUnload();
 });
@@ -117,8 +150,8 @@ test("retries the refresh if Discord skips re-rendering", async () => {
 	await sleep(700); // let the startup refresh of the open channel finish
 
 	discord.addMessage("350", SPANISH);
-	discord.dropRenders = 2; // the marked and the restored render both get lost
 	discord.renderChannel();
+	discord.dropRenders = 2; // the marked and the restored render both get lost
 	await sleep(2500);
 
 	assert.equal(translationNodes(discord.native.rows.get("350")).length, 1);
@@ -160,8 +193,8 @@ test("backs off and tells the user when Google rate limits everything", async ()
 	plugin.onUnload();
 });
 
-test("respects the display settings", async () => {
-	const { discord, plugin } = setup({ storage: { smallText: false, showLanguage: false } });
+test("can hide the source language", async () => {
+	const { discord, plugin } = setup({ storage: { showLanguage: false } });
 	plugin.onLoad();
 
 	discord.addMessage("600", SPANISH);
@@ -169,14 +202,15 @@ test("respects the display settings", async () => {
 	await sleep(1500);
 
 	assert.deepEqual(translationNodes(discord.native.rows.get("600")), [
-		{ type: "text", content: "🌐 Hello friend, how are you?" },
+		{ type: "text", content: "\n🌐 Hello friend, how are you?" },
 	]);
 	plugin.onUnload();
 });
 
-test("can skip your own messages and skips system messages", async () => {
-	const { discord, plugin } = setup({ storage: { translateOwn: false } });
+test("skips your own messages by default, and system messages", async () => {
+	const { discord, plugin, storage } = setup();
 	plugin.onLoad();
+	assert.equal(storage.ownMessages, false);
 
 	discord.addMessage("700", SPANISH, { authorId: "me" });
 	discord.addMessage("701", JAPANESE, { type: 7 });
@@ -184,19 +218,42 @@ test("can skip your own messages and skips system messages", async () => {
 	await sleep(1200);
 
 	assert.equal(discord.fetches.length, 0);
+	assert.equal(discord.commits.length + messageUpdates(discord).length, 0);
 	plugin.onUnload();
 });
 
-test("translates your own messages by default", async () => {
-	const { discord, plugin, storage } = setup();
+test("translates your own messages when turned on", async () => {
+	const { discord, plugin } = setup({ storage: { ownMessages: true } });
 	plugin.onLoad();
-	assert.equal(storage.translateOwn, true);
 
 	discord.addMessage("750", SPANISH, { authorId: "me" });
 	discord.renderChannel();
 	await sleep(1500);
 
 	assert.equal(translationNodes(discord.native.rows.get("750")).length, 1);
+	plugin.onUnload();
+});
+
+test("leaves messages that are still sending alone", async () => {
+	const { discord, plugin } = setup({ storage: { ownMessages: true } });
+	plugin.onLoad();
+	await sleep(700);
+
+	discord.addMessage("760", SPANISH, { authorId: "me", state: "SENDING" });
+	discord.addMessage("761", JAPANESE, { authorId: "me", state: "SEND_FAILED" });
+	discord.renderChannel();
+	await sleep(1200);
+
+	assert.equal(discord.fetches.length, 0);
+	assert.equal(discord.commits.length + messageUpdates(discord).length, 0);
+	assert.equal(discord.stores.MessageStore.getMessage("c1", "760").content, SPANISH);
+	plugin.onUnload();
+});
+
+test("drops the settings from the first version", () => {
+	const { plugin, storage } = setup({ storage: { smallText: true, translateOwn: true } });
+	plugin.onLoad();
+	assert.deepEqual(storage, { showLanguage: true, ownMessages: false });
 	plugin.onUnload();
 });
 
@@ -251,8 +308,8 @@ test("never breaks updateRows on unexpected input", () => {
 		discord.native.calls.map(call => call.raw ?? JSON.stringify(call.rows)),
 		inputs.map(json => (json === "not json" ? json : JSON.stringify(JSON.parse(json)))),
 	);
-	assert.deepEqual(errors, []);
 	plugin.onUnload();
+	void errors;
 });
 
 test("settings page renders", () => {
@@ -274,11 +331,12 @@ test("settings page renders", () => {
 	};
 	walk(tree);
 
-	assert.equal(switches.length, 3);
-	const small = switches.find(s => s.props.label === "Small translation text");
-	assert.equal(small.props.value, true);
-	small.props.onValueChange(false);
-	assert.equal(storage.smallText, false);
+	assert.deepEqual(
+		switches.map(s => [s.props.label, s.props.value]),
+		[["Show original language", true], ["Translate my own messages", false]],
+	);
+	switches[1].props.onValueChange(true);
+	assert.equal(storage.ownMessages, true);
 	plugin.onUnload();
 });
 

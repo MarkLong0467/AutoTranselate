@@ -1,5 +1,5 @@
 import { logger } from "@vendetta";
-import { findByStoreName } from "@vendetta/metro";
+import { findByProps, findByStoreName } from "@vendetta/metro";
 import { FluxDispatcher, ReactNative } from "@vendetta/metro/common";
 import { before } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
@@ -11,15 +11,16 @@ import { lookup, onTranslated, request, type Translation } from "./translator";
 // Discord renders chat natively. JS hands the native side the rendered rows
 // as JSON through NativeChatModule.updateRows(chatId, json); each message row
 // carries the message's parsed markdown as a tree of nodes, so the
-// translation is appended to that tree as extra nodes.
+// translation is appended to that tree as an extra text node.
 
 const MessageStore = findByStoreName("MessageStore");
 const ChannelStore = findByStoreName("ChannelStore");
 const SelectedChannelStore = findByStoreName("SelectedChannelStore");
 const UserStore = findByStoreName("UserStore");
 
-const PREFIX = "🌐 ";
-const MARK = "\u200B";
+const PREFIX = "\n🌐 ";
+// Zero-width space, appended to a message for a moment to make Discord re-render it.
+const MARK = String.fromCharCode(0x200b);
 const RESTORE_DELAY_MS = 400;
 const VERIFY_DELAY_MS = 1500;
 const MAX_REFRESH_ATTEMPTS = 3;
@@ -48,7 +49,7 @@ const SKIPPED_NODES = new Set([
 ]);
 const BLOCK_NODES = new Set(["heading", "blockQuote", "list", "paragraph", "subtext"]);
 
-// Messages whose content currently ends with MARK (see refreshMessage).
+// Messages whose content currently ends with MARK (see toggleMark).
 const marked = new Set<string>();
 // Messages showing a translation right now, so they can be refreshed when settings change.
 const shown = new Map<string, string>();
@@ -95,35 +96,33 @@ export function extractText(content: any[]): string {
 	collectText(content, out);
 	return out
 		.join("")
-		.replace(/\u200B/g, "")
+		.split(MARK)
+		.join("")
 		.replace(/[ \t]+/g, " ")
 		.replace(/ ?\n[ \n]*/g, "\n")
 		.trim();
 }
 
 function isOurNode(node: any) {
-	if (!node) return false;
-	if (node.type === "text") return typeof node.content === "string" && node.content.indexOf(PREFIX) === 0;
-	if (node.type === "subtext" && Array.isArray(node.content)) return isOurNode(node.content[0]);
-	return false;
+	return node?.type === "text" && typeof node.content === "string" && node.content.indexOf(PREFIX) === 0;
 }
 
+/** Appends the translation under the message text. Returns false if there was nothing to add. */
 export function appendTranslation(content: any[], translation: Translation) {
 	const label = storage.showLanguage === false ? "" : languageName(translation.lang);
-	const lines = translation.text
+	const text = translation.text
 		.split("\n")
 		.map(line => line.trim())
-		.filter(line => line.length > 0);
+		.filter(line => line.length > 0)
+		.join("\n");
+	if (!text) return false;
 
-	lines.forEach((line, i) => {
-		const text = i === 0 ? `${PREFIX}${label ? `${label}: ` : ""}${line}` : line;
-		const node = { type: "text", content: text };
-		content.push({ type: "text", content: "\n" });
-		content.push(storage.smallText === false ? node : { type: "subtext", content: [node] });
-	});
+	// A plain text node: the kind Discord's own parser produces for ordinary text.
+	content.push({ type: "text", content: `${PREFIX}${label ? `${label}: ` : ""}${text}` });
+	return true;
 }
 
-/** Removes the trailing MARK added by refreshMessage from the last node of a content tree. */
+/** Removes the trailing MARK added by toggleMark from the last node of a content tree. */
 function stripMark(nodes: any[]): boolean {
 	for (let i = nodes.length - 1; i >= 0; i--) {
 		const node = nodes[i];
@@ -155,15 +154,29 @@ function stripMark(nodes: any[]): boolean {
 	return false;
 }
 
+function isMine(authorId: string | undefined) {
+	const me = UserStore?.getCurrentUser?.();
+	return !!me && me.id === authorId;
+}
+
+/** Messages still being sent (or that failed to send) have a state other than "SENT". */
+function isSent(message: any) {
+	return typeof message?.state !== "string" || message.state === "SENT";
+}
+
+/** Checks a message from MessageStore: an ordinary message that has been sent. */
+function isTranslatable(message: any) {
+	if (typeof message.type === "number" && !TRANSLATABLE_TYPES.has(message.type)) return false;
+	if (!isSent(message)) return false;
+	return storage.ownMessages === true || !isMine(message.author?.id);
+}
+
+/** Checks a chat row's message. */
 function shouldTranslate(message: any) {
-	if (storage.translateOwn === false) {
-		const me = UserStore?.getCurrentUser?.();
-		if (me && me.id === message.authorId) return false;
-	}
+	if (storage.ownMessages !== true && isMine(message.authorId)) return false;
 
 	const stored = message.channelId ? MessageStore?.getMessage?.(message.channelId, message.id) : undefined;
-	if (stored && typeof stored.type === "number" && !TRANSLATABLE_TYPES.has(stored.type)) return false;
-	return true;
+	return !stored || isTranslatable(stored);
 }
 
 /** Adds the translation to one row. Returns true if the row changed. */
@@ -186,12 +199,11 @@ export function processRow(row: any): boolean {
 		request(text, message.channelId, message.id);
 		return changed;
 	}
-	if (translation === null) {
+	if (translation === null || !appendTranslation(message.content, translation)) {
 		shown.delete(message.id);
 		return changed;
 	}
 
-	appendTranslation(message.content, translation);
 	shown.set(message.id, message.channelId);
 	if (shown.size > 300) shown.delete(shown.keys().next().value!);
 	delivered.set(message.id, Date.now());
@@ -200,31 +212,31 @@ export function processRow(row: any): boolean {
 }
 
 function onUpdateRows(args: any[]) {
-	const json = args[1];
-	if (typeof json !== "string" || json.indexOf("\"message\"") === -1) return;
-
-	let rows: any;
 	try {
-		rows = JSON.parse(json);
-	} catch {
-		return;
-	}
-	if (!Array.isArray(rows)) return;
+		const json = args[1];
+		if (typeof json !== "string" || json.indexOf("\"message\"") === -1) return;
 
-	if (!hookSeen) {
-		hookSeen = true;
-		logger.log("AutoTranslate: receiving chat rows");
-	}
+		const rows = JSON.parse(json);
+		if (!Array.isArray(rows)) return;
 
-	let changed = false;
-	for (const row of rows) {
-		try {
-			if (processRow(row)) changed = true;
-		} catch (e) {
-			logger.error("AutoTranslate: failed to process a chat row", e);
+		if (!hookSeen) {
+			hookSeen = true;
+			logger.log("AutoTranslate: receiving chat rows");
 		}
+
+		let changed = false;
+		for (const row of rows) {
+			try {
+				if (processRow(row)) changed = true;
+			} catch (e) {
+				logger.error("AutoTranslate: failed to process a chat row", e);
+			}
+		}
+		if (changed) args[1] = JSON.stringify(rows);
+	} catch (e) {
+		// Never let a problem here break Discord's chat.
+		logger.error("AutoTranslate: failed to process chat rows", e);
 	}
-	if (changed) args[1] = JSON.stringify(rows);
 }
 
 function findChatModules() {
@@ -251,9 +263,15 @@ function findChatModules() {
 
 // --- Re-rendering ---
 //
-// A translation arrives after its row was rendered. To render the row again,
-// the message's content is changed for a moment (an invisible mark is
-// appended) and then restored, which makes Discord regenerate the row.
+// A translation arrives after its row was drawn. To draw the row again, an
+// invisible mark is appended to the message's content for a moment and then
+// removed. The change is made in Discord's local message cache, the way
+// Vencord's MessageUpdater re-renders messages: no Flux event is dispatched,
+// so nothing else (like message logger plugins) sees an "edit". If the cache
+// can't be found, or updating it doesn't re-render the row, a MESSAGE_UPDATE
+// carrying only the message's id, channel and content is used instead.
+
+type Method = "cache" | "event";
 
 interface Refresh {
 	channelId: string;
@@ -264,16 +282,53 @@ interface Refresh {
 const pendingRefresh = new Map<string, Refresh>(); // messageId -> refresh
 const restoring = new Set<string>();
 let refreshTimer: any = null;
+let cacheConfirmed = false; // a cache update re-rendered a row
+let preferEvent = false; // a cache update didn't, but an event did
 
-function dispatchContent(message: any, content: string) {
+let channelMessages: any;
+
+function getChannelMessages() {
+	if (channelMessages === undefined) {
+		channelMessages = null;
+		for (const props of [["getOrCreate", "commit", "clearCache"], ["clearCache", "_channelMessages"]]) {
+			try {
+				const found = findByProps(...props);
+				if (typeof found?.commit === "function") {
+					channelMessages = found;
+					break;
+				}
+			} catch {}
+		}
+	}
+	return channelMessages;
+}
+
+function setContentInCache(channelId: string, messageId: string, content: string) {
+	const ChannelMessages = getChannelMessages();
+	if (!ChannelMessages || typeof MessageStore?.emitChange !== "function") return false;
+
+	try {
+		const cache = ChannelMessages.get?.(channelId) ?? ChannelMessages.getOrCreate?.(channelId);
+		const message = cache?.get?.(messageId);
+		if (!message || typeof message.merge !== "function" || typeof cache.update !== "function") return false;
+
+		ChannelMessages.commit(cache.update(messageId, (m: any) => m.merge({ content })));
+		MessageStore.emitChange();
+		return true;
+	} catch (e) {
+		logger.warn("AutoTranslate: couldn't update the message cache", e);
+		return false;
+	}
+}
+
+function setContentWithEvent(message: any, content: string) {
 	try {
 		FluxDispatcher.dispatch({
 			type: "MESSAGE_UPDATE",
 			message: {
-				...message,
 				id: message.id,
 				channel_id: message.channel_id,
-				guild_id: message.guild_id ?? ChannelStore?.getChannel?.(message.channel_id)?.guild_id,
+				guild_id: ChannelStore?.getChannel?.(message.channel_id)?.guild_id,
 				content,
 			},
 			log_edit: false,
@@ -286,41 +341,65 @@ function dispatchContent(message: any, content: string) {
 	}
 }
 
-function refreshNow(messageId: string, { channelId, attempt }: Refresh) {
-	const message = MessageStore?.getMessage?.(channelId, messageId);
-	if (!message || typeof message.content !== "string" || !message.content) return;
+function setContent(method: Method, message: any, content: string): Method | undefined {
+	if (method === "cache" && setContentInCache(message.channel_id, message.id, content)) return "cache";
+	return setContentWithEvent(message, content) ? "event" : undefined;
+}
 
-	if (attempt !== undefined) {
-		// If Discord doesn't re-render the row (it may batch updates), try again.
-		const started = Date.now();
-		setTimeout(() => {
-			if (stopped || (delivered.get(messageId) ?? -1) >= started) return;
-			if (attempt + 1 >= MAX_REFRESH_ATTEMPTS) return;
-			if (SelectedChannelStore?.getChannelId?.() !== channelId) return;
-			refreshMessage(channelId, messageId, attempt + 1);
-		}, VERIFY_DELAY_MS);
-	}
-
-	if (restoring.has(messageId)) return; // the pending restore re-renders it anyway
-
-	const original = message.content;
+function toggleMark(message: any, method: Method): Method | undefined {
+	const id: string = message.id;
+	const channelId: string = message.channel_id;
+	const original: string = message.content;
 	const withMark = original + MARK;
-	marked.add(messageId);
-	if (!dispatchContent(message, withMark)) {
-		marked.delete(messageId);
-		return;
+
+	marked.add(id);
+	const used = setContent(method, message, withMark);
+	if (!used) {
+		marked.delete(id);
+		return undefined;
 	}
 
-	restoring.add(messageId);
+	restoring.add(id);
 	setTimeout(() => {
-		restoring.delete(messageId);
-		const current = MessageStore?.getMessage?.(channelId, messageId);
-		if (current && current.content === withMark) dispatchContent(current, original);
+		restoring.delete(id);
+		const current = MessageStore?.getMessage?.(channelId, id);
+		if (current && current.content === withMark) setContent(used, current, original);
 		// Rows can be regenerated a little later; keep stripping the mark for a while.
 		setTimeout(() => {
-			if (!restoring.has(messageId)) marked.delete(messageId);
+			if (!restoring.has(id)) marked.delete(id);
 		}, 3000);
 	}, RESTORE_DELAY_MS);
+	return used;
+}
+
+function verifyLater(channelId: string, messageId: string, attempt: number, started: number, used?: Method) {
+	setTimeout(() => {
+		if (stopped) return;
+		if ((delivered.get(messageId) ?? -1) >= started) {
+			if (used === "cache") cacheConfirmed = true;
+			else if (used === "event" && !cacheConfirmed) preferEvent = true;
+			return;
+		}
+		if (attempt + 1 >= MAX_REFRESH_ATTEMPTS) return;
+		if (SelectedChannelStore?.getChannelId?.() !== channelId) return;
+		refreshMessage(channelId, messageId, attempt + 1);
+	}, VERIFY_DELAY_MS);
+}
+
+function refreshNow(messageId: string, { channelId, attempt }: Refresh) {
+	const message = MessageStore?.getMessage?.(channelId, messageId);
+	if (!message || typeof message.content !== "string" || !message.content || !isSent(message)) return;
+
+	const started = Date.now();
+	let used: Method | undefined;
+	// While a restore is pending, it re-renders the row anyway.
+	if (!restoring.has(messageId)) {
+		// After a cache update failed to re-render a row, try an event instead.
+		const method: Method = preferEvent || (attempt && !cacheConfirmed) ? "event" : "cache";
+		used = toggleMark(message, method);
+		if (!used) return;
+	}
+	if (attempt !== undefined) verifyLater(channelId, messageId, attempt, started, used);
 }
 
 function flushRefreshes() {
@@ -362,10 +441,12 @@ function refreshOpenChannel() {
 	const messages = MessageStore?.getMessages?.(channelId);
 	const list: any[] = messages?.toArray?.() ?? messages?._array ?? [];
 	for (const message of list.slice(-50)) {
-		const rough = String(message?.content ?? "")
+		if (!message?.id || !isTranslatable(message)) continue;
+
+		const rough = String(message.content ?? "")
 			.replace(/```[\s\S]*?```|`[^`]*`|<[^>\s]+>|https?:\/\/\S+|\|\|[\s\S]*?\|\|/g, " ")
 			.trim();
-		if (message?.id && needsTranslation(rough)) refreshMessage(channelId, message.id);
+		if (needsTranslation(rough)) refreshMessage(channelId, message.id);
 	}
 }
 

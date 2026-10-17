@@ -10,21 +10,20 @@ import { clearTranslations } from "./translator";
 
 const OPTIONS = [
 	{
-		key: "smallText",
-		label: "Small translation text",
-		subLabel: "Show translations as small grey text. Turn this off if translations don't show up.",
-	},
-	{
 		key: "showLanguage",
 		label: "Show original language",
 		subLabel: "Start each translation with the language it was translated from.",
+		default: true,
 	},
 	{
-		key: "translateOwn",
+		key: "ownMessages",
 		label: "Translate my own messages",
 		subLabel: "Also translate messages you send.",
+		default: false,
 	},
 ];
+
+const isOn = (option: (typeof OPTIONS)[number]) => storage[option.key] ?? option.default;
 
 let components: Record<string, any> | undefined;
 
@@ -60,13 +59,13 @@ export default function Settings() {
 	if (TableRowGroup && TableSwitchRow && TableRow) {
 		return (
 			<RN.ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 38 }}>
-				<TableRowGroup title="Display">
+				<TableRowGroup title="Options">
 					{OPTIONS.map(option => (
 						<TableSwitchRow
 							key={option.key}
 							label={option.label}
 							subLabel={option.subLabel}
-							value={storage[option.key] !== false}
+							value={isOn(option)}
 							onValueChange={(value: boolean) => setOption(option.key, value)}
 						/>
 					))}
@@ -88,13 +87,13 @@ export default function Settings() {
 	if (FormSection && FormSwitchRow && FormRow) {
 		return (
 			<RN.ScrollView style={{ flex: 1 }}>
-				<FormSection title="Display">
+				<FormSection title="Options">
 					{OPTIONS.map(option => (
 						<FormSwitchRow
 							key={option.key}
 							label={option.label}
 							subLabel={option.subLabel}
-							value={storage[option.key] !== false}
+							value={isOn(option)}
 							onValueChange={(value: boolean) => setOption(option.key, value)}
 						/>
 					))}
@@ -123,7 +122,7 @@ export default function Settings() {
 						<RN.Text style={{ color: "gray", fontSize: 12 }}>{option.subLabel}</RN.Text>
 					</RN.View>
 					<RN.Switch
-						value={storage[option.key] !== false}
+						value={isOn(option)}
 						onValueChange={(value: boolean) => setOption(option.key, value)}
 					/>
 				</RN.View>

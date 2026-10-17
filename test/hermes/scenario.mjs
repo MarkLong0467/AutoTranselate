@@ -61,7 +61,7 @@ async function main() {
 	const spanish = translationNodes(discord.native.rows.get("1"));
 	check(
 		"Spanish message gets an English translation",
-		spanish.length === 1 && spanish[0].content[0].content === "\u{1F310} Spanish: Hello friend, how are you?",
+		spanish.length === 1 && spanish[0].content === "\n\u{1F310} Spanish: Hello friend, how are you?",
 	);
 	check("English message is left alone", translationNodes(discord.native.rows.get("2")).length === 0);
 	check("only foreign messages hit the network", discord.fetches.length === 2);
