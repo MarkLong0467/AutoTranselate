@@ -13,16 +13,16 @@ English messages are left alone. Code blocks, links, mentions, emoji and spoiler
 ## Install
 
 1. In Discord, open **Settings → Revenge → Plugins**.
-2. Tap the **+** button ("Install a plugin") and paste this URL:
+2. Tap the **+** button ("Install a plugin") and paste this URL exactly:
 
    ```
-   https://raw.githubusercontent.com/MarkLong0467/AutoTranselate/ccr-aaec8523-v7wuc8/dist/
+   https://raw.githubusercontent.com/MarkLong0467/AutoTranselate/HEAD/dist/
    ```
+
+   The repository page link (`https://github.com/MarkLong0467/AutoTranselate`) doesn't work: Revenge needs the link to the built plugin files, and fails with "Failed to fetch manifest" otherwise.
 
 3. Revenge warns that the plugin isn't from its proxy. Tap **Continue**.
 4. Make sure **AutoTranslate** is switched on. Messages in the open channel are translated within a few seconds.
-
-If the plugin later moves to another branch (for example `main`), replace `ccr-aaec8523-v7wuc8` in the URL with that branch's name.
 
 ## Settings
 
